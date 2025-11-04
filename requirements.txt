@@ -1,0 +1,6 @@
+# Pinned versions for local runs and Streamlit Cloud
+numpy==2.3.4
+pandas==2.3.3
+matplotlib==3.10.7
+requests==2.32.5
+streamlit==1.51.0
