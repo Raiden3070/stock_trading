@@ -252,7 +252,17 @@ def main():
             "Benchmark": bench_portvals.squeeze(),
         })
         df_norm = df / df.iloc[0]
-        st.line_chart(df_norm)
+
+        # Matplotlib chart to add a reference line at 1.0 (initial normalized value)
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        for col, color in [("Learner", "tab:green"), ("Benchmark", "tab:orange")]:
+            if col in df_norm.columns:
+                ax2.plot(df_norm.index, df_norm[col].values, label=col, color=color)
+        ax2.axhline(1.0, color="red", linestyle="--", linewidth=1.2, label="Initial value (1.0)")
+        ax2.set_ylabel("Normalized Portfolio Value")
+        ax2.grid(alpha=0.25)
+        ax2.legend(loc="best")
+        st.pyplot(fig2, clear_figure=True)
 
 
 if __name__ == "__main__":
