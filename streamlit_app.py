@@ -26,7 +26,7 @@ def get_api_key() -> str | None:
         return None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def cached_fetch(symbol: str, sd_str: str, ed_str: str, outputsize: str = "full") -> pd.Series:
     # Cache wrapper that accepts strings (hashable) for dates
     api_key = get_api_key()
@@ -109,10 +109,139 @@ def main():
                 "- Increase the test window months for more robust evaluation."
             )
 
+        # Inform users about the bundled GOOG dataset (offline, not live)
+        try:
+            data_dir_info = os.path.join(os.path.dirname(__file__), "data")
+            goog_full_csv = os.path.join(data_dir_info, "GOOG_TIME_SERIES_DAILY_full.csv")
+            if os.path.isfile(goog_full_csv):
+                _df_info = pd.read_csv(goog_full_csv, index_col=0, parse_dates=True)
+                last_dt = _df_info.index.max().date() if not _df_info.empty else None
+                if symbol.upper() == "GOOG":
+                    st.info(f"GOOG is preloaded (offline). You can train/test without API limits up to {last_dt or 'the bundled end date'}. Data is not live.")
+                else:
+                    st.caption(f"Tip: GOOG is preloaded offline up to {last_dt or 'the bundled end date'} for unlimited demo runs (not live).")
+        except Exception:
+            pass
+
+        if st.button("Clear data cache"):
+            # Clear Streamlit cache for cached_fetch
+            cached_fetch.clear()
+            # Clear on-disk Alpha Vantage cache for this app instance
+            try:
+                cache_dir = os.path.join(os.path.dirname(__file__), ".av_cache")
+                if os.path.isdir(cache_dir):
+                    for fname in os.listdir(cache_dir):
+                        fpath = os.path.join(cache_dir, fname)
+                        if os.path.isfile(fpath):
+                            os.remove(fpath)
+                st.success("Cache cleared.")
+            except Exception as _:
+                st.info("Streamlit cache cleared. Disk cache may persist until the container restarts.")
+
         run_btn = st.button("Train + Predict")
 
     if not run_btn:
-        st.info("Select your parameters in the sidebar and click 'Train + Predict'.")
+        # Try to show a default demo from a bundled CSV, then local cache, without requiring API calls
+        demo_symbol = "GOOG"
+        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        demo_csv = os.path.join(data_dir, "GOOG_demo.csv")
+
+        # Helper to render a demo section
+        def _render_demo(prices_train: pd.Series, prices_test: pd.Series, note: str):
+            st.caption(note)
+            sl = StrategyLearner(verbose=False, impact=0.0, commission=0.0)
+            tr_sd_demo = prices_train.index.min().to_pydatetime()
+            tr_ed_demo = prices_train.index.max().to_pydatetime()
+            te_sd_demo = prices_test.index.min().to_pydatetime()
+            te_ed_demo = prices_test.index.max().to_pydatetime()
+            sl.add_evidence(symbol=demo_symbol, sd=tr_sd_demo, ed=tr_ed_demo, sv=100000, price_series=prices_train)
+            signal, last_ts = compute_latest_signal(sl, demo_symbol, prices_test)
+            label = {1: "BUY", 0: "HOLD", -1: "SELL"}.get(signal, "UNKNOWN")
+            sl_trades = sl.testPolicy(symbol=demo_symbol, sd=te_sd_demo, ed=te_ed_demo, sv=100000, price_series=prices_test)
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.subheader(f"{demo_symbol} price (demo)")
+                try:
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.plot(prices_test.index, prices_test.values, label=f"{demo_symbol} price", color="tab:blue")
+                    if demo_symbol in sl_trades.columns:
+                        buys = sl_trades[sl_trades[demo_symbol] > 0]
+                        sells = sl_trades[sl_trades[demo_symbol] < 0]
+                        if not buys.empty:
+                            ax.scatter(buys.index, prices_test.loc[buys.index], marker="^", color="green", s=70, label="BUY")
+                        if not sells.empty:
+                            ax.scatter(sells.index, prices_test.loc[sells.index], marker="v", color="red", s=70, label="SELL")
+                    ax.set_ylabel("Price")
+                    ax.grid(alpha=0.25)
+                    ax.legend(loc="best")
+                    st.pyplot(fig, clear_figure=True)
+                except Exception as e:
+                    st.info(f"Could not render trade markers: {e}")
+            with col2:
+                st.subheader("Latest signal (demo)")
+                st.metric(label=f"{demo_symbol} – {last_ts.date()}", value=label)
+
+            with st.expander("Show simulated portfolios (benchmark vs learner) – demo"):
+                ms = ManualStrategy(verbose=False, impact=0.0, commission=0.0)
+                ms_trades = ms.testPolicy(symbol=demo_symbol, sd=te_sd_demo, ed=te_ed_demo, sv=100000, price_series=prices_test)
+                ms_orders = trades_to_orders(ms_trades, demo_symbol)
+                ms_portvals = compute_portvals(ms_orders, start_val=100000, commission=0.0, impact=0.0,
+                                               sd=te_sd_demo, ed=te_ed_demo,
+                                               prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
+
+                sl_orders = trades_to_orders(sl_trades, demo_symbol)
+                sl_portvals = compute_portvals(sl_orders, start_val=100000, commission=0.0, impact=0.0,
+                                               sd=te_sd_demo, ed=te_ed_demo,
+                                               prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
+
+                bench = pd.Series(0, index=prices_test.index, name=demo_symbol).to_frame()
+                if not bench.empty:
+                    bench.iloc[0] = 1000
+                bench_orders = trades_to_orders(bench, demo_symbol)
+                bench_portvals = compute_portvals(bench_orders, start_val=100000, commission=0.0, impact=0.0,
+                                                  sd=te_sd_demo, ed=te_ed_demo,
+                                                  prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
+
+                df = pd.DataFrame({
+                    "Manual": ms_portvals.squeeze(),
+                    "Learner": sl_portvals.squeeze(),
+                    "Benchmark": bench_portvals.squeeze(),
+                })
+                df_norm = df / df.iloc[0]
+                st.line_chart(df_norm)
+
+        # 1) Try bundled demo CSV first
+        try:
+            if os.path.isfile(demo_csv):
+                df_demo = pd.read_csv(demo_csv, parse_dates=["Date"])  # expects columns: Date, Close
+                series_demo = df_demo.set_index("Date")["Close"].astype(float)
+                series_demo.name = demo_symbol
+                if len(series_demo) >= 10:
+                    split_idx = int(len(series_demo) * 0.7)
+                    prices_train = series_demo.iloc[:split_idx]
+                    prices_test = series_demo.iloc[split_idx:]
+                    _render_demo(prices_train, prices_test, "Example data (bundled) — not live. Click 'Train + Predict' to use your settings.")
+                    return
+        except Exception:
+            pass
+
+        # 2) Fallback: try local Alpha Vantage cache without fresh API calls
+        te_ed_demo = dt.datetime.combine(dt.date.today(), dt.time())
+        te_sd_demo = te_ed_demo - dt.timedelta(days=180)
+        tr_ed_demo = te_sd_demo - dt.timedelta(days=1)
+        tr_sd_demo = tr_ed_demo - dt.timedelta(days=365)
+        try:
+            from alpha_data import fetch_daily_close as _fetch
+            series_demo = _fetch(demo_symbol, tr_sd_demo, te_ed_demo, api_key=get_api_key(), outputsize="full", use_cache=True, force_refresh=False)
+            prices_train = series_demo.loc[tr_sd_demo:tr_ed_demo]
+            prices_test = series_demo.loc[te_sd_demo:te_ed_demo]
+            if not prices_train.empty and not prices_test.empty:
+                _render_demo(prices_train, prices_test, "Showing a cached demo for GOOG. Click 'Train + Predict' to run with your settings.")
+                return
+        except Exception:
+            pass
+
+        st.info("Select your parameters in the sidebar and click 'Train + Predict'. If a bundled or cached GOOG demo is available, it will display automatically.")
         return
 
     # Fetch data
@@ -122,17 +251,51 @@ def main():
         te_ed = dt.datetime.combine(test_end, dt.time())
         te_sd = te_ed - dt.timedelta(days=int(test_months * 30))
 
+        # Single API call: fetch a superset window, then slice into train/test
+        combined_sd = min(tr_sd, te_sd)
+        combined_ed = max(tr_ed, te_ed)
+        span_days = (combined_ed - combined_sd).days
+        outputsize = "compact" if span_days <= 100 else "full"
+
         try:
-            prices_train = cached_fetch(symbol, tr_sd.isoformat(), tr_ed.isoformat())
-            prices_test = cached_fetch(symbol, te_sd.isoformat(), te_ed.isoformat())
+            full_series = cached_fetch(symbol, combined_sd.isoformat(), combined_ed.isoformat(), outputsize=outputsize)
+            prices_train = full_series.loc[tr_sd:tr_ed]
+            prices_test = full_series.loc[te_sd:te_ed]
         except ValueError as ve:
-            st.error("Alpha Vantage API key not found. On Streamlit Cloud, add it via Settings → Secrets as ALPHAVANTAGE_API_KEY. For local runs, set the environment variable or .streamlit/secrets.toml.")
-            st.stop()
+            # No API key: try bundled GOOG full CSV fallback
+            data_dir = os.path.join(os.path.dirname(__file__), "data")
+            fallback_csv = os.path.join(data_dir, "GOOG_TIME_SERIES_DAILY_full.csv")
+            if symbol.upper() == "GOOG" and os.path.isfile(fallback_csv):
+                df_fb = pd.read_csv(fallback_csv, index_col=0, parse_dates=True)
+                if "GOOG" in df_fb.columns:
+                    full_series = df_fb["GOOG"].astype(float)
+                    prices_train = full_series.loc[tr_sd:tr_ed]
+                    prices_test = full_series.loc[te_sd:te_ed]
+                    st.warning("Using bundled GOOG dataset due to missing API key.")
+                else:
+                    st.error("Bundled GOOG fallback file found but missing 'GOOG' column.")
+                    st.stop()
+            else:
+                st.error("Alpha Vantage API key not found. On Streamlit Cloud, add it via Settings → Secrets as ALPHAVANTAGE_API_KEY. For local runs, set the environment variable or .streamlit/secrets.toml.")
+                st.stop()
         except RuntimeError as re:
-            # Likely rate limit or API-side error; show friendly message
-            st.error(f"Data fetch failed: {re}")
-            st.info("Tip: Alpha Vantage free tier allows ~5 requests/min and ~25/day. Wait a minute and try again, or reduce re-runs.")
-            st.stop()
+            # Likely rate limit or API-side error; try bundled GOOG full CSV fallback
+            data_dir = os.path.join(os.path.dirname(__file__), "data")
+            fallback_csv = os.path.join(data_dir, "GOOG_TIME_SERIES_DAILY_full.csv")
+            if symbol.upper() == "GOOG" and os.path.isfile(fallback_csv):
+                df_fb = pd.read_csv(fallback_csv, index_col=0, parse_dates=True)
+                if "GOOG" in df_fb.columns:
+                    full_series = df_fb["GOOG"].astype(float)
+                    prices_train = full_series.loc[tr_sd:tr_ed]
+                    prices_test = full_series.loc[te_sd:te_ed]
+                    st.warning("Using bundled GOOG dataset due to API rate limit.")
+                else:
+                    st.error("Bundled GOOG fallback file found but missing 'GOOG' column.")
+                    st.stop()
+            else:
+                st.error(f"Data fetch failed: {re}")
+                st.info("Tip: Alpha Vantage free tier allows up to 5 requests/min and up to 25 requests/day. Wait a minute and try again.")
+                st.stop()
 
     if prices_train.empty:
         st.error("No training data returned. Check symbol or API limits.")
