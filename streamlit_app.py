@@ -122,8 +122,17 @@ def main():
         te_ed = dt.datetime.combine(test_end, dt.time())
         te_sd = te_ed - dt.timedelta(days=int(test_months * 30))
 
-        prices_train = cached_fetch(symbol, tr_sd.isoformat(), tr_ed.isoformat())
-        prices_test = cached_fetch(symbol, te_sd.isoformat(), te_ed.isoformat())
+        try:
+            prices_train = cached_fetch(symbol, tr_sd.isoformat(), tr_ed.isoformat())
+            prices_test = cached_fetch(symbol, te_sd.isoformat(), te_ed.isoformat())
+        except ValueError as ve:
+            st.error("Alpha Vantage API key not found. On Streamlit Cloud, add it via Settings → Secrets as ALPHAVANTAGE_API_KEY. For local runs, set the environment variable or .streamlit/secrets.toml.")
+            st.stop()
+        except RuntimeError as re:
+            # Likely rate limit or API-side error; show friendly message
+            st.error(f"Data fetch failed: {re}")
+            st.info("Tip: Alpha Vantage free tier allows ~5 requests/min and ~25/day. Wait a minute and try again, or reduce re-runs.")
+            st.stop()
 
     if prices_train.empty:
         st.error("No training data returned. Check symbol or API limits.")
