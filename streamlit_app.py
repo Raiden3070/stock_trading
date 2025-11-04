@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from alpha_data import fetch_daily_close
 from StrategyLearner import StrategyLearner
-from ManualStrategy import ManualStrategy, trades_to_orders
+from ManualStrategy import trades_to_orders
 from marketsimcode import compute_portvals
 import indicators as ind
 
@@ -123,125 +123,11 @@ def main():
         except Exception:
             pass
 
-        if st.button("Clear data cache"):
-            # Clear Streamlit cache for cached_fetch
-            cached_fetch.clear()
-            # Clear on-disk Alpha Vantage cache for this app instance
-            try:
-                cache_dir = os.path.join(os.path.dirname(__file__), ".av_cache")
-                if os.path.isdir(cache_dir):
-                    for fname in os.listdir(cache_dir):
-                        fpath = os.path.join(cache_dir, fname)
-                        if os.path.isfile(fpath):
-                            os.remove(fpath)
-                st.success("Cache cleared.")
-            except Exception as _:
-                st.info("Streamlit cache cleared. Disk cache may persist until the container restarts.")
 
         run_btn = st.button("Train + Predict")
 
     if not run_btn:
-        # Try to show a default demo from a bundled CSV, then local cache, without requiring API calls
-        demo_symbol = "GOOG"
-        data_dir = os.path.join(os.path.dirname(__file__), "data")
-        demo_csv = os.path.join(data_dir, "GOOG_demo.csv")
-
-        # Helper to render a demo section
-        def _render_demo(prices_train: pd.Series, prices_test: pd.Series, note: str):
-            st.caption(note)
-            sl = StrategyLearner(verbose=False, impact=0.0, commission=0.0)
-            tr_sd_demo = prices_train.index.min().to_pydatetime()
-            tr_ed_demo = prices_train.index.max().to_pydatetime()
-            te_sd_demo = prices_test.index.min().to_pydatetime()
-            te_ed_demo = prices_test.index.max().to_pydatetime()
-            sl.add_evidence(symbol=demo_symbol, sd=tr_sd_demo, ed=tr_ed_demo, sv=100000, price_series=prices_train)
-            signal, last_ts = compute_latest_signal(sl, demo_symbol, prices_test)
-            label = {1: "BUY", 0: "HOLD", -1: "SELL"}.get(signal, "UNKNOWN")
-            sl_trades = sl.testPolicy(symbol=demo_symbol, sd=te_sd_demo, ed=te_ed_demo, sv=100000, price_series=prices_test)
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.subheader(f"{demo_symbol} price (demo)")
-                try:
-                    fig, ax = plt.subplots(figsize=(10, 4))
-                    ax.plot(prices_test.index, prices_test.values, label=f"{demo_symbol} price", color="tab:blue")
-                    if demo_symbol in sl_trades.columns:
-                        buys = sl_trades[sl_trades[demo_symbol] > 0]
-                        sells = sl_trades[sl_trades[demo_symbol] < 0]
-                        if not buys.empty:
-                            ax.scatter(buys.index, prices_test.loc[buys.index], marker="^", color="green", s=70, label="BUY")
-                        if not sells.empty:
-                            ax.scatter(sells.index, prices_test.loc[sells.index], marker="v", color="red", s=70, label="SELL")
-                    ax.set_ylabel("Price")
-                    ax.grid(alpha=0.25)
-                    ax.legend(loc="best")
-                    st.pyplot(fig, clear_figure=True)
-                except Exception as e:
-                    st.info(f"Could not render trade markers: {e}")
-            with col2:
-                st.subheader("Latest signal (demo)")
-                st.metric(label=f"{demo_symbol} – {last_ts.date()}", value=label)
-
-            with st.expander("Show simulated portfolios (benchmark vs learner) – demo"):
-                ms = ManualStrategy(verbose=False, impact=0.0, commission=0.0)
-                ms_trades = ms.testPolicy(symbol=demo_symbol, sd=te_sd_demo, ed=te_ed_demo, sv=100000, price_series=prices_test)
-                ms_orders = trades_to_orders(ms_trades, demo_symbol)
-                ms_portvals = compute_portvals(ms_orders, start_val=100000, commission=0.0, impact=0.0,
-                                               sd=te_sd_demo, ed=te_ed_demo,
-                                               prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
-
-                sl_orders = trades_to_orders(sl_trades, demo_symbol)
-                sl_portvals = compute_portvals(sl_orders, start_val=100000, commission=0.0, impact=0.0,
-                                               sd=te_sd_demo, ed=te_ed_demo,
-                                               prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
-
-                bench = pd.Series(0, index=prices_test.index, name=demo_symbol).to_frame()
-                if not bench.empty:
-                    bench.iloc[0] = 1000
-                bench_orders = trades_to_orders(bench, demo_symbol)
-                bench_portvals = compute_portvals(bench_orders, start_val=100000, commission=0.0, impact=0.0,
-                                                  sd=te_sd_demo, ed=te_ed_demo,
-                                                  prices_df_override=pd.DataFrame({demo_symbol: prices_test}))
-
-                df = pd.DataFrame({
-                    "Manual": ms_portvals.squeeze(),
-                    "Learner": sl_portvals.squeeze(),
-                    "Benchmark": bench_portvals.squeeze(),
-                })
-                df_norm = df / df.iloc[0]
-                st.line_chart(df_norm)
-
-        # 1) Try bundled demo CSV first
-        try:
-            if os.path.isfile(demo_csv):
-                df_demo = pd.read_csv(demo_csv, parse_dates=["Date"])  # expects columns: Date, Close
-                series_demo = df_demo.set_index("Date")["Close"].astype(float)
-                series_demo.name = demo_symbol
-                if len(series_demo) >= 10:
-                    split_idx = int(len(series_demo) * 0.7)
-                    prices_train = series_demo.iloc[:split_idx]
-                    prices_test = series_demo.iloc[split_idx:]
-                    _render_demo(prices_train, prices_test, "Example data (bundled) — not live. Click 'Train + Predict' to use your settings.")
-                    return
-        except Exception:
-            pass
-
-        # 2) Fallback: try local Alpha Vantage cache without fresh API calls
-        te_ed_demo = dt.datetime.combine(dt.date.today(), dt.time())
-        te_sd_demo = te_ed_demo - dt.timedelta(days=180)
-        tr_ed_demo = te_sd_demo - dt.timedelta(days=1)
-        tr_sd_demo = tr_ed_demo - dt.timedelta(days=365)
-        try:
-            from alpha_data import fetch_daily_close as _fetch
-            series_demo = _fetch(demo_symbol, tr_sd_demo, te_ed_demo, api_key=get_api_key(), outputsize="full", use_cache=True, force_refresh=False)
-            prices_train = series_demo.loc[tr_sd_demo:tr_ed_demo]
-            prices_test = series_demo.loc[te_sd_demo:te_ed_demo]
-            if not prices_train.empty and not prices_test.empty:
-                _render_demo(prices_train, prices_test, "Showing a cached demo for GOOG. Click 'Train + Predict' to run with your settings.")
-                return
-        except Exception:
-            pass
-
-        st.info("Select your parameters in the sidebar and click 'Train + Predict'. If a bundled or cached GOOG demo is available, it will display automatically.")
+        st.info("Select your parameters in the sidebar and click 'Train + Predict'.")
         return
 
     # Fetch data
@@ -346,14 +232,7 @@ def main():
         st.metric(label=f"{symbol} – {last_ts.date()}", value=label)
 
     # Optional: simulate portfolios for context
-    with st.expander("Show simulated portfolios (benchmark vs learner)"):
-        ms = ManualStrategy(verbose=False, impact=impact, commission=commission)
-        ms_trades = ms.testPolicy(symbol=symbol, sd=te_sd, ed=te_ed, sv=100000, price_series=prices_test)
-        ms_orders = trades_to_orders(ms_trades, symbol)
-        ms_portvals = compute_portvals(ms_orders, start_val=100000, commission=commission, impact=impact,
-                                       sd=te_sd, ed=te_ed,
-                                       prices_df_override=pd.DataFrame({symbol: prices_test}))
-
+    with st.expander("Show normalized simulated portfolios (benchmark vs learner)"):
         # Use previously computed sl_trades
         sl_orders = trades_to_orders(sl_trades, symbol)
         sl_portvals = compute_portvals(sl_orders, start_val=100000, commission=commission, impact=impact,
@@ -369,7 +248,6 @@ def main():
                                           prices_df_override=pd.DataFrame({symbol: prices_test}))
 
         df = pd.DataFrame({
-            "Manual": ms_portvals.squeeze(),
             "Learner": sl_portvals.squeeze(),
             "Benchmark": bench_portvals.squeeze(),
         })
