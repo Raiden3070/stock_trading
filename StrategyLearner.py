@@ -82,14 +82,13 @@ class StrategyLearner(object):
   		  	   		 	   			  		 			     			  	 
         # add your code to do learning here  		  	   		 	   			  		 			     			  	 
   		  	   		 	   			  		 			     			  	 
-        # example usage of the old backward compatible util function  		  	   		 	   			  		 			     			  	 
-        syms = [symbol]
-        dates = pd.date_range(sd, ed)
-        prices_all = get_data(syms, dates)  # automatically adds SPY
-        prices = prices_all[syms].ffill().bfill()  # only portfolio symbols
-
+        # Prefer injected series to avoid filesystem reads (works on Streamlit Cloud)
+        if price_series is not None:
+            prices = pd.Series(price_series).loc[sd:ed].ffill().bfill()
+        else:
+            prices = get_data([symbol], pd.date_range(sd, ed))[symbol]
         if self.verbose:
-            print("This is prices of the symbol: ", syms)
+            print("Training on prices for:", symbol)
             print(prices)
 
         # Compute indicators (use provided series if any)
@@ -100,10 +99,6 @@ class StrategyLearner(object):
         ppo = ind.compute_ppo(sd, ed, symbol, price_series=price_series)
 
         N = 19
-        if price_series is not None:
-            prices = pd.Series(price_series).loc[sd:ed].ffill().bfill()
-        else:
-            prices = get_data([symbol], pd.date_range(sd, ed))[symbol]
         # Use forward N-day return for labeling; simulator handles impact/commission
         returns = (prices.shift(-N) / prices) - 1.0
 
